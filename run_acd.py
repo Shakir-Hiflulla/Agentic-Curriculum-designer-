@@ -1,6 +1,7 @@
 import os, sys, time, subprocess, signal, json, pathlib
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+from dotenv import load_dotenv
 
 ROOT = pathlib.Path(__file__).resolve().parent
 VENV = ROOT / ".venv" / "Scripts"  # Windows venv path
@@ -8,20 +9,20 @@ PYTHON = str(VENV / "python.exe")
 UVICORN = str(VENV / "uvicorn.exe")
 STREAMLIT = str(VENV / "streamlit.exe")
 
+# Load .env for all agents
+load_dotenv(dotenv_path=ROOT / ".env")
+
 # --- Service definitions ---
-CURR = {"name":"curriculum",  "module":"apps.curriculum_agent.main:app", "port":8001, "health":("GET", "http://localhost:8001/")}
-IR   = {"name":"ir",          "module":"apps.ir_agent.main:app",         "port":8002, "health":("POST","http://localhost:8002/search", {"query":"ping","top_k":1})}
-NLP  = {"name":"nlp",         "module":"apps.nlp_agent.main:app",        "port":8003, "health":("POST","http://localhost:8003/summarize", {"text":"ping","max_words":12})}
-ORCH = {"name":"orchestrator","module":"apps.orchestrator.main:app",     "port":8000, "health":("GET", "http://localhost:8000/health")}
+CURR = {"name": "curriculum",  "module": "apps.curriculum_agent.main:app", "port": 8001, "health": ("GET", "http://localhost:8001/")}
+IR   = {"name": "ir",          "module": "apps.ir_agent.main:app",         "port": 8002, "health": ("POST", "http://localhost:8002/search", {"query": "ping", "top_k": 1})}
+NLP  = {"name": "nlp",         "module": "apps.nlp_agent.main:app",        "port": 8003, "health": ("POST", "http://localhost:8003/summarize", {"text": "ping", "max_words": 12})}
+ORCH = {"name": "orchestrator","module": "apps.orchestrator.main:app",     "port": 8000, "health": ("GET", "http://localhost:8000/health")}
 
 STREAMLIT_UI = str(ROOT / "streamlit_app.py")
 
 # --- Shared env for all services ---
 ENV_COMMON = {
-    "ORCH_CURRICULUM_BASE": "http://localhost:8001",
-    "ORCH_IR_BASE": "http://localhost:8002",
-    "ORCH_NLP_BASE": "http://localhost:8003",
-    "FAST_MODE": "1"
+    "FAST_MODE": "1"  # override for fast test mode
 }
 
 def _env(extra=None):
@@ -45,7 +46,7 @@ def _http_check(method, url, payload=None, timeout=2.5):
             req = Request(url, method="GET")
         else:
             data = json.dumps(payload or {}).encode()
-            req = Request(url, data=data, headers={"Content-Type":"application/json"}, method="POST")
+            req = Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
         with urlopen(req, timeout=timeout) as resp:
             return True, resp.status
     except Exception as e:

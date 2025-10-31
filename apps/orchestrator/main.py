@@ -1,4 +1,6 @@
-# apps/orchestrator/main.py
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +13,7 @@ from datetime import datetime, timedelta
 
 app = FastAPI(title="Orchestrator Agent", version="1.5")
 
-# ---------- CORS (handy for Streamlit on another port) ----------
+# ---------- CORS ----------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("ORCH_CORS_ORIGINS", "*").split(","),
@@ -24,26 +26,19 @@ app.add_middleware(
 JWT_SECRET = os.getenv("JWT_SECRET", "change_me")
 JWT_ALG = os.getenv("JWT_ALG", "HS256")
 
-# Your defaults/ports:
-# - Curriculum -> 8001
-# - IR         -> 8002
-# - NLP        -> 8003
 CURR_BASE = os.getenv("ORCH_CURRICULUM_BASE", "http://localhost:8001")
 IR_BASE   = os.getenv("ORCH_IR_BASE",         "http://localhost:8002")
 NLP_BASE  = os.getenv("ORCH_NLP_BASE",        "http://localhost:8003")
 
-# Enable stubbed response (no upstream calls)
 STUB_MODE = os.getenv("STUB_MODE", "0") == "1"
 
-# HTTP client tuning via env
 USE_HTTP2        = os.getenv("ORCH_HTTP2", "0") == "1"
 TIMEOUT_CONNECT  = float(os.getenv("ORCH_TIMEOUT_CONNECT", "10.0"))
 TIMEOUT_READ     = float(os.getenv("ORCH_TIMEOUT_READ",    "600.0"))
 TIMEOUT_WRITE    = float(os.getenv("ORCH_TIMEOUT_WRITE",   "60.0"))
 TIMEOUT_POOL     = float(os.getenv("ORCH_TIMEOUT_POOL",    "10.0"))
 
-# Retry/backoff knobs
-RETRY_ATTEMPTS   = int(os.getenv("ORCH_RETRY_ATTEMPTS", "2"))  # additional tries after the first
+RETRY_ATTEMPTS   = int(os.getenv("ORCH_RETRY_ATTEMPTS", "2"))
 BACKOFF_BASE_S   = float(os.getenv("ORCH_BACKOFF_BASE_S", "0.6"))
 
 # ---------- Auth ----------
@@ -63,10 +58,10 @@ def verify_jwt(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme
     except JWTError:
         raise HTTPException(401, "Invalid token")
 
-# ---------- Rate limit (per-process, token-bucket) ----------
+# ---------- Rate limit ----------
 BUCKETS: Dict[str, Dict[str, Any]] = {}
-RATE = 60     # tokens
-REFILL = 60   # per minute
+RATE = 60
+REFILL = 60
 
 def rate_limit(user: AuthUser):
     now = time.time()
@@ -83,11 +78,9 @@ def rate_limit(user: AuthUser):
 
 # ---------- Models ----------
 class DesignReq(BaseModel):
-    # Original fields
     course_title: str = Field(..., description="Course title")
     level: str = Field("Beginner", description="Audience level")
     top_k: int = Field(5, description="IR top-k (fallback if ir_top_k missing)")
-    # Streamlit/extended fields (optional)
     notes: Optional[str] = Field(None, description="Optional notes to guide grounding")
     ir_top_k: Optional[int] = None
     include_trace: Optional[bool] = True
@@ -102,7 +95,6 @@ class TokenReq(BaseModel):
 # ---------- Token endpoints ----------
 @app.post("/token")
 def generate_token(body: Optional[TokenReq] = None, username: Optional[str] = None):
-    # Accept {"username": "..."} or {"sub": "..."} or query param ?username=
     name = (body.username if body and body.username else
             body.sub if body and body.sub else
             username if username else
@@ -123,10 +115,6 @@ def root():
 
 @app.get("/health")
 async def health():
-    """
-    Always returns HTTP 200 with per-service status; never raises.
-    Does not assume /health exists on upstreams.
-    """
     client = _client()
 
     async def ping_json(method: str, url: str, *, payload: dict | None = None):
@@ -143,7 +131,6 @@ async def health():
                     timeout=httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0),
                 )
             ok = (200 <= r.status_code < 300)
-            # best-effort JSON parse
             try:
                 body = r.json()
             except Exception:
@@ -188,7 +175,7 @@ def _client() -> httpx.AsyncClient:
         CLIENT = httpx.AsyncClient(timeout=TIMEOUT, http2=USE_HTTP2)
     return CLIENT
 
-# ---------- Small util: robust POST+JSON with retries ----------
+# ---------- Robust POST with retries ----------
 async def _post_json(
     url: str,
     payload: Dict[str, Any],
@@ -196,10 +183,6 @@ async def _post_json(
     attempts: int = RETRY_ATTEMPTS,
     per_request_timeout: Optional[httpx.Timeout] = None,
 ) -> Dict[str, Any]:
-    """
-    POST JSON and parse JSON response.
-    Retries on read timeouts / 5xx with exponential backoff.
-    """
     client = _client()
     last_exc: Optional[Exception] = None
     tries = 1 + max(0, attempts)
@@ -235,11 +218,6 @@ def _derive_top_k(req: DesignReq) -> int:
     return max(1, int(req.top_k or 5))
 
 def _extract_totals(modules_obj: Any) -> Dict[str, Optional[int]]:
-    """
-    Compute modules_count and total_estimated_hours from Curriculum responses.
-    Supports dict like: {"Module 1": {"Estimated Hours": 3}, ...}
-    Or list of modules with "estimated_hours".
-    """
     try:
         if isinstance(modules_obj, dict):
             keys = [k for k in modules_obj.keys() if isinstance(k, str) and k.lower().startswith("module")]
@@ -300,7 +278,7 @@ async def design(req: DesignReq, user: AuthUser = Depends(verify_jwt)):
     if req.include_trace:
         trace["steps"].append({"ir_results": ir})
 
-    # 2) NLP summarize (append optional notes to give context)
+    # 2) NLP summarize
     joined_snippets = "\n\n".join([(x.get("snippet") or x.get("text") or "") for x in ir.get("results", [])])[:4000]
     context = (joined_snippets + ("\n\nNOTES:\n" + req.notes if req.notes else "")).strip() or title
     nlp_sum = await _post_json(
@@ -320,7 +298,7 @@ async def design(req: DesignReq, user: AuthUser = Depends(verify_jwt)):
     if req.include_trace:
         trace["steps"].append({"redacted_summary": redacted})
 
-    # 4) Curriculum: outcomes -> modules -> assessments
+    # 4) Curriculum
     common = {"title": title, "level": req.level, "grounding": redacted}
 
     cur_out = await _post_json(f"{CURR_BASE}/outcomes", common)
@@ -342,14 +320,16 @@ async def design(req: DesignReq, user: AuthUser = Depends(verify_jwt)):
         trace["steps"].append({"modules": modules})
 
     cur_ass = await _post_json(
-        f"{CURR_BASE}/assessments",
-        {**common, "modules": modules},
+    f"{CURR_BASE}/assessments",
+    {**common, "modules": modules},
     )
-    assessments = cur_ass.get("assessments") or []
+
+    # Normalize assessments safely
+    assessments = cur_ass.get("assessments") if isinstance(cur_ass, dict) else (cur_ass if isinstance(cur_ass, list) else [])
+
     if req.include_trace:
         trace["steps"].append({"assessments": assessments})
 
-    # Compute totals for UI
     totals = _extract_totals(modules)
 
     response = {

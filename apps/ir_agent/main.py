@@ -1,6 +1,9 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import os, glob, time
 import numpy as np
 import torch
@@ -8,17 +11,16 @@ from sentence_transformers import SentenceTransformer
 
 app = FastAPI(title="IR Agent (NumPy Cosine, no FAISS)", version="1.1")
 
-# ---- Simple corpus + embedding store ----
 MODEL_NAME = os.getenv("IR_EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 CORPUS_DIR = os.getenv("IR_CORPUS_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "data", "corpus"))
 
-# Small result cache (query -> (ts, results)), avoids re-encoding identical queries repeatedly
 CACHE_TTL_SEC = int(os.getenv("IR_CACHE_TTL", "120"))
 _cache: Dict[Tuple[str, int], Tuple[float, List[Dict]]] = {}
 
-model: SentenceTransformer | None = None
+# Globals
+model: Optional[SentenceTransformer] = None
 docs: List[Dict] = []
-embeddings: np.ndarray | None = None  # shape: (N, D), L2-normalized
+embeddings: Optional[np.ndarray] = None  # shape: (N, D), L2-normalized
 
 class SearchRequest(BaseModel):
     query: str
@@ -41,9 +43,7 @@ def _read_corpus() -> List[Dict]:
     return items
 
 def _encode_texts(texts: List[str]) -> np.ndarray:
-    # normalize_embeddings=True gives L2-normalized vectors -> cosine == dot
     vecs = model.encode(texts, batch_size=32, convert_to_numpy=True, normalize_embeddings=True)
-    # ensure float32 to save RAM and for fast dot-products
     if vecs.dtype != np.float32:
         vecs = vecs.astype(np.float32)
     return vecs
@@ -56,7 +56,7 @@ def build_index() -> None:
     docs = _read_corpus()
     texts = [d["text"] if d["text"] else d["title"] for d in docs]
     if len(texts) == 0:
-        embeddings = np.zeros((0, 384), dtype=np.float32)  # default dim; will be ignored
+        embeddings = np.zeros((0, 384), dtype=np.float32)
         return
     embeddings = _encode_texts(texts)
     print(f"[IR] Indexed {len(docs)} documents from {CORPUS_DIR} with dim={embeddings.shape[1]}")
@@ -64,19 +64,15 @@ def build_index() -> None:
 def _top_k_cosine(query: str, k: int) -> Tuple[List[int], np.ndarray]:
     if embeddings is None or len(docs) == 0:
         return [], np.zeros((0,), dtype=np.float32)
-    q = _encode_texts([query])[0]  # already L2-normalized
-    # cosine = dot since both q and embeddings are normalized
-    scores = embeddings @ q  # shape (N,)
+    q = _encode_texts([query])[0]  # normalized
+    scores = embeddings @ q  # cosine == dot
     k = max(1, min(k, scores.shape[0]))
-    # argpartition for fast top-k
     idx = np.argpartition(-scores, kth=k-1)[:k]
-    # sort those k by score desc
     idx = idx[np.argsort(-scores[idx])]
     return idx.tolist(), scores
 
 @app.on_event("startup")
 def _startup():
-    # Build index + light warmup
     build_index()
     if embeddings is not None and len(docs) > 0:
         try:
@@ -96,7 +92,6 @@ def reindex():
 
 @app.post("/search")
 def search(req: SearchRequest):
-    # cache key considers top_k to preserve exact behavior
     now = time.time()
     key = (req.query.strip(), int(req.top_k))
     hit = _cache.get(key)
@@ -120,6 +115,5 @@ def search(req: SearchRequest):
             "score": float(scores[i]),
             "snippet": snippet
         })
-
     _cache[key] = (now, results)
     return {"results": results}

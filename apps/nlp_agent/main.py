@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Literal, Tuple
@@ -40,7 +43,6 @@ class RedactOut(BaseModel):
 
 # --------- Helpers ----------
 def _chunk_text(text: str, max_chars: int = 2000) -> List[str]:
-    """Simple char-based chunking to avoid model max length issues."""
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) <= max_chars:
         return [text]
@@ -58,7 +60,6 @@ def _chunk_text(text: str, max_chars: int = 2000) -> List[str]:
     return [c for c in chunks if c]
 
 def _adaptive_lengths(text: str, max_words: int):
-    """Pick max/min length based on input size and desired summary length."""
     n_words = max(1, len(text.split()))
     target_words = min(max_words, max(10, int(n_words * 0.6)))
     max_len = max(8, min(256, int(target_words * 1.3)))
@@ -66,7 +67,6 @@ def _adaptive_lengths(text: str, max_words: int):
     return max_len, min_len
 
 def _mask_spans(text: str, spans: List[Tuple[int, int, str]], show_label: bool) -> str:
-    """Replace spans with mask tokens."""
     out = []
     last = 0
     for start, end, label in spans:
@@ -79,6 +79,20 @@ def _mask_spans(text: str, spans: List[Tuple[int, int, str]], show_label: bool) 
         last = end
     out.append(text[last:])
     return "".join(out)
+
+# --------- Entity label mapping (model -> standard) ----------
+LABEL_MAP = {
+    "PER": "PERSON",
+    "ORG": "ORG",
+    "LOC": "LOC",
+    "GPE": "GPE",
+    "FAC": "FAC",
+    "NORP": "NORP",
+    "DATE": "DATE",
+    "TIME": "TIME",
+    "EVENT": "EVENT",
+    "LANG": "LANGUAGE"
+}
 
 # --------- Endpoints ----------
 @app.get("/health")
@@ -109,15 +123,21 @@ def summarize(payload: SummarizeIn):
 def ner_redact(payload: RedactIn):
     try:
         ents = ner(payload.text)
-        keep = [e for e in ents if e["entity_group"] in set(payload.redact_labels)]
+        # filter and map labels
+        keep = [
+            e for e in ents
+            if LABEL_MAP.get(e["entity_group"], None) in set(payload.redact_labels)
+        ]
         keep.sort(key=lambda e: (e["start"], e["end"]))
+
         merged: List[Tuple[int, int, str]] = []
         for e in keep:
-            s, e_, lab = int(e["start"]), int(e["end"]), str(e["entity_group"])
+            s, e_, lab = int(e["start"]), int(e["end"]), LABEL_MAP.get(e["entity_group"], "UNKNOWN")
             if not merged or s > merged[-1][1]:
                 merged.append((s, e_, lab))
             else:
                 merged[-1] = (merged[-1][0], max(merged[-1][1], e_), merged[-1][2])
+
         redacted = _mask_spans(payload.text, merged, show_label=payload.show_label)
         return {
             "redacted": redacted,
